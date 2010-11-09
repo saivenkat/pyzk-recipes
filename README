@@ -1,0 +1,6 @@
+Recipes for Zookeeper in python for ditributed process coordination
+
+- Queues
+- Barriers
+- Lock manager
+- Leader Election
