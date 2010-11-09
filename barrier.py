@@ -91,7 +91,7 @@ if __name__ == '__main__':
 	    if result:
                 print "Worker %s starting now to be useful" %(self.n)
 	    else:
-	        print "Retrying"
+	        print "Worker %s retrying" %(self.n)
 		barrier.wait_on_exist(10, self.callback)
 
     print "Starting master"
