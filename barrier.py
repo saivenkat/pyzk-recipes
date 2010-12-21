@@ -1,14 +1,14 @@
-import zookeeper, sys, time, threading
+import zookeeper, sys, time, threading, uuid
 ZOO_OPEN_ACL_UNSAFE = {"perms" : 0x1f, "scheme" : "world", "id" : "anyone"};
 
 class ZkBarrier(object):
-    def __init__(self, barriername):
+    def __init__(self, barriername, number_of_workers):
 	self.cv = threading.Condition()
 	self.connected = False
 	self.barrier = "/" + barriername
+	self.workers = number_of_workers
 	zookeeper.set_log_stream(open('/dev/null'))
 	def watcher(handle, type, state, path):
-	    print 'Connected'
 	    self.cv.acquire()
 	    self.connected = True
 	    self.cv.notify()
@@ -21,90 +21,57 @@ class ZkBarrier(object):
             print "Connection to ZooKeeper cluster timed out - is a server running on localhost:2181?"
             sys.exit()
 	self.cv.release()
-
-    def create(self):
 	try:
-	    zookeeper.create(self.handle, self.barrier, "barrier", [ZOO_OPEN_ACL_UNSAFE], 0)
+	    zookeeper.create(self.handle, self.barrier, '\x00', [ZOO_OPEN_ACL_UNSAFE], 0)
 	except zookeeper.NodeExistsException:
-	    print "Barrier exists - %s" %(self.barrier)
+	    pass
 	except Exception, ex:
 	    print ex
 	    raise ex
+	self.name = str(uuid.uuid1())
 
-    def remove(self):
-        try:
-	    print "Now removing"
-	    (data,stat) = zookeeper.get(self.handle, self.barrier, None)
-            zookeeper.delete(self.handle, self.barrier, stat["version"])
-	    print "Removed barrier %s" %(self.barrier)
-	except zookeeper.NoNodeException:
-	    print "No barrier %s" %(barrier)
-	    return None
-	except Exception, e:
-	    print e
-	    raise e
-    
-    def wait_on_exist(self, times, callback):
-        self.callback_flag = False
-	self.rc = 0
-        def notify(handle, rc, stat):
+
+    def enter(self):
+        self.name = zookeeper.create(self.handle, self.barrier + "/" + self.name, '\x00', [ZOO_OPEN_ACL_UNSAFE], 3) 
+	self.ready = False
+        def ready_watcher(handle, rc, stat):
+            self.cv.acquire()
+            self.cv.notify()
+	    self.ready = True
+            self.cv.release()
+	zookeeper.aexists(self.handle, self.barrier + "/ready", None, ready_watcher)
+	children = zookeeper.get_children(self.handle, self.barrier , None)
+	while(len(children) < self.workers):
 	    self.cv.acquire()
-	    self.callback_flag = True
-	    self.cv.notify()
+	    if self.ready:
+	        break
+	    print "Waiting for others. Number of children %s" %(len(children))
+	    self.cv.wait(15.0)
 	    self.cv.release()
-	    self.rc = rc
+        
+	if not self.ready:
+	    zookeeper.create(self.handle, self.barrier + "/ready", '\x00', [ZOO_OPEN_ACL_UNSAFE], 1)
 
-        self.cv.acquire()
-        ret = zookeeper.aexists(self.handle, self.barrier, None, notify )
-        assert(ret == zookeeper.OK)
-        while (self.rc != -101) and (times >= 0):
-	    print "Blocked as barrier is there"
-            self.cv.wait(15.0)
-	    times = times - 1
-        self.cv.release()
-	if self.callback_flag:
-	    callback(True)
-	else:
-	    callback(False)
+        return True
 
+	    
 if __name__ == '__main__':
     from threading import Thread
-    class Master(Thread):
-	def __init__(self):
-            Thread.__init__(self)
-	def run(self):
-	    barrier = ZkBarrier("indexing")
-	    barrier.create()
-	    print "Created a barrier. Now doing some work..."
-	    set(range(10000000)).difference(set())
-	    barrier.remove()
-	    print "Removing barrier. All workers proceed..."
     class Worker(Thread):
         def __init__(self, n):
 	    self.n = n
 	    Thread.__init__(self)
         def run(self):
-            barrier = ZkBarrier("indexing")
-	    print "Worker %s blocked" %(self.n)
-            barrier.wait_on_exist(10, self.callback)
-        def callback(self, result):
-	    if result:
-                print "Worker %s starting now to be useful" %(self.n)
-	    else:
-	        print "Worker %s retrying" %(self.n)
-		barrier.wait_on_exist(10, self.callback)
+            barrier = ZkBarrier("indexing", 5)
+	    b = barrier.enter()
+            if b:
+	        print "Doing work"
+	        set(range(10000000)).difference(set())
 
-    print "Starting master"
-    m = Master()
-    m.start()
     print "Starting all workers"
     workers = [Worker(x) for x in xrange(5)]
     for w in workers:
         w.start()
-    m.join()
     for w in workers:
         w.join()
     print 'Done'
-        
-    
-     
